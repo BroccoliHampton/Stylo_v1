@@ -1,79 +1,83 @@
-// This file assumes a Vercel deployment where the API key is stored 
-// as an Environment Variable named ELEVENLABS_API_KEY.
+// api/compose.js
 
-import { URL } from 'url';
+/**
+ * Vercel Serverless Function to securely proxy requests to the ElevenLabs Music API.
+ * * Assumes the ELEVENLABS_API_KEY is set as an environment variable in Vercel.
+ */
 
-// Handler for the Vercel Serverless Function
-export default async function handler(req, res) {
-    // 1. Check for POST method
-    if (req.method !== 'POST') {
-        res.setHeader('Allow', ['POST']);
-        return res.status(405).json({ error: 'Method Not Allowed' });
+// Define the ElevenLabs Music Generation API Endpoint
+const ELEVENLABS_URL = 'https://api.elevenlabs.io/v1/music-generation';
+
+export default async function handler(request, response) {
+    // 1. **Security Check: API Key**
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    if (!apiKey) {
+        return response.status(500).json({ error: 'Server configuration error', detail: 'ELEVENLABS_API_KEY environment variable is not set.' });
     }
 
-    // 2. Get API Key from environment variables (SECURE)
-    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-
-    if (!ELEVENLABS_API_KEY) {
-        return res.status(500).json({ error: 'Server configuration error: ELEVENLABS_API_KEY not set.' });
+    // 2. **Method Check: Only POST is allowed**
+    if (request.method !== 'POST') {
+        return response.status(405).json({ error: 'Method Not Allowed', detail: 'This endpoint only accepts POST requests.' });
     }
 
-    // 3. Extract prompt from the client request body
-    const { prompt } = req.body;
+    // 3. **Extract Prompt from Request Body**
+    const { prompt } = request.body;
 
-    if (!prompt) {
-        return res.status(400).json({ error: 'Missing required parameter: prompt.' });
+    if (!prompt || typeof prompt !== 'string' || prompt.trim() === '') {
+        return response.status(400).json({ error: 'Bad Request', detail: 'Missing or invalid "prompt" in request body.' });
     }
-
-    const elevenLabsUrl = 'https://api.elevenlabs.io/v1/music/compose';
     
-    // Payload for ElevenLabs Music API
-    const payload = {
-        prompt: prompt,
-        music_length_ms: 15000,
-        model_id: "music_v1",
-        force_instrumental: true,
-    };
+    console.log(`Received prompt: "${prompt}"`);
 
     try {
-        // 4. Call ElevenLabs API (Server-to-Server, bypassing CORS)
-        const elevenLabsResponse = await fetch(elevenLabsUrl, {
+        // 4. **Call the ElevenLabs API**
+        const elevenLabsResponse = await fetch(ELEVENLABS_URL, {
             method: 'POST',
             headers: {
+                // Securely use the API key from the server's environment
+                'xi-api-key': apiKey, 
                 'Content-Type': 'application/json',
-                'xi-api-key': ELEVENLABS_API_KEY, // Use the secure key
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({
+                prompt: prompt,
+                // Add any other desired configuration parameters here (e.g., duration)
+                // duration_seconds: 30, 
+            }),
         });
 
-        // 5. Handle non-OK responses from ElevenLabs
+        // 5. **Handle API Errors**
         if (!elevenLabsResponse.ok) {
-            const errorBody = await elevenLabsResponse.json();
-            const errorDetail = errorBody.detail || JSON.stringify(errorBody);
-            // Forward the ElevenLabs error status and details to the client
-            return res.status(elevenLabsResponse.status).json({
-                error: 'ElevenLabs API Error',
-                detail: errorDetail,
-                status: elevenLabsResponse.status
+            let errorDetail = `ElevenLabs API failed with status ${elevenLabsResponse.status}.`;
+            try {
+                // Attempt to read the error body from ElevenLabs
+                const errorJson = await elevenLabsResponse.json();
+                errorDetail = errorJson.detail || errorJson.error || JSON.stringify(errorJson);
+            } catch (e) {
+                // If it's not JSON, just use the status
+            }
+            console.error('ElevenLabs API Error:', errorDetail);
+            return response.status(elevenLabsResponse.status).json({ 
+                error: 'ElevenLabs API Error', 
+                detail: errorDetail 
             });
         }
         
-        // 6. Forward successful audio response
+        // 6. **Pipe Audio Stream to Client**
         
-        // Get the Blob data and content type
+        // ElevenLabs should return a `Content-Type: audio/mpeg` or similar.
         const contentType = elevenLabsResponse.headers.get('Content-Type') || 'audio/mpeg';
-        const buffer = await elevenLabsResponse.arrayBuffer();
 
-        // Set response headers to enable client-side playback and download
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Length', buffer.byteLength);
-        res.setHeader('Access-Control-Allow-Origin', '*'); // Crucial for CORS
-        
-        // Send the raw audio buffer back to the client
-        return res.status(200).send(Buffer.from(buffer));
+        response.setHeader('Content-Type', contentType);
+        response.status(200); // 200 OK for a successful stream
+
+        // Pipe the stream directly from ElevenLabs to your client
+        return elevenLabsResponse.body.pipe(response);
 
     } catch (error) {
-        console.error('Proxy Fetch Error:', error);
-        return res.status(500).json({ error: 'Internal server error during API proxy.', detail: error.message });
+        console.error('Proxy Catch Block Error:', error);
+        return response.status(500).json({ 
+            error: 'Internal Server Error', 
+            detail: error.message 
+        });
     }
 }
