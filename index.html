@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Farcaster Music Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'fc-purple': '#855EED',
+                        'fc-light': '#F8F7F4',
+                        'fc-dark': '#1C1C1C',
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F8F7F4;
+        }
+        .container-card {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen flex items-center justify-center p-4">
+        <div class="container-card w-full max-w-lg bg-white p-8 rounded-xl border border-gray-200">
+            <h1 class="text-3xl font-extrabold text-fc-dark mb-2 text-center">
+                🎶 Farcaster Music Studio
+            </h1>
+            <p class="text-center text-gray-500 mb-6">
+                Enter a prompt to generate music via the secure serverless proxy.
+            </p>
+
+            <div class="mb-4">
+                <p class="text-xs text-green-500 font-medium p-2 bg-green-50 rounded-lg">
+                    ✅ **Secure Proxy Active:** The app uses the `/api/compose` endpoint to protect your ElevenLabs API Key.
+                </p>
+            </div>
+
+
+            <label for="prompt" class="block text-sm font-medium text-gray-700 mb-2">
+                Music Prompt (e.g., "A chill synthwave track with heavy bass and reverb.")
+            </label>
+            <textarea id="prompt" rows="3" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-fc-purple focus:border-fc-purple transition" placeholder="Enter your music description here..."></textarea>
+
+            <div class="mt-6 flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+                <button id="generate-button" class="flex-1 px-6 py-3 bg-fc-purple text-white font-semibold rounded-lg shadow-lg hover:bg-opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                    Generate Music
+                </button>
+                <button id="copy-link-button" class="sm:w-auto px-6 py-3 bg-gray-200 text-fc-dark font-semibold rounded-lg hover:bg-gray-300 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                    Copy Cast Link
+                </button>
+            </div>
+
+            <div id="status-message" class="mt-6 p-4 rounded-lg text-sm text-center font-medium hidden"></div>
+            
+            <div id="audio-output" class="mt-6 p-4 border border-dashed border-gray-300 rounded-lg hidden">
+                <p class="text-center text-gray-600 mb-3 font-medium">Your Generated Audio:</p>
+                <audio id="audio-player" controls class="w-full rounded-lg"></audio>
+                <p class="text-center text-xs text-gray-400 mt-2" id="audio-source">
+                    Generated track successfully!
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Removed apiKeyInput from client side
+        const promptInput = document.getElementById('prompt');
+        const generateButton = document.getElementById('generate-button');
+        const copyLinkButton = document.getElementById('copy-link-button');
+        const statusMessage = document.getElementById('status-message');
+        const audioOutput = document.getElementById('audio-output');
+        const audioPlayer = document.getElementById('audio-player');
+        const audioSourceText = document.getElementById('audio-source');
+        
+        // --- Production API Call (Calls Vercel Proxy) ---
+
+        async function callServerlessProxy(prompt) {
+            // NOTE: This call is relative, assuming your HTML is hosted on the same domain as your Vercel function.
+            const PROXY_ENDPOINT = '/api/compose'; 
+            const maxRetries = 3;
+
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    const response = await fetch(PROXY_ENDPOINT, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ prompt })
+                    });
+
+                    if (response.ok) {
+                        // The serverless function sends back the raw audio data (Blob)
+                        const audioBlob = await response.blob(); 
+                        const contentType = response.headers.get('Content-Type') || 'audio/mpeg';
+
+                        if (audioBlob.type.startsWith('audio/')) {
+                            return { 
+                                url: URL.createObjectURL(audioBlob),
+                                type: audioBlob.type 
+                            };
+                        } else {
+                             // This handles cases where the proxy returns a non-audio 200/201 response 
+                             // (e.g., a proxy returning JSON metadata or an error message it didn't catch)
+                            const text = await audioBlob.text();
+                            throw new Error(`Proxy returned unexpected content type. Body preview: ${text.substring(0, 100)}...`);
+                        }
+                    } else {
+                        // Handle errors returned by the Serverless function (which itself contains the ElevenLabs error)
+                        let errorDetail = `Serverless Function failed with status ${response.status}.`;
+                        try {
+                            const errorJson = await response.json();
+                            errorDetail = errorJson.detail || errorJson.error || JSON.stringify(errorJson);
+                        } catch (e) {
+                            const text = await response.text();
+                            errorDetail += ` Response body was not JSON. Status ${response.status}. Body preview: ${text.substring(0, 100)}...`;
+                        }
+                        throw new Error(errorDetail);
+                    }
+                } catch (error) {
+                    console.error("Serverless Proxy Fetch error:", error);
+                    if (attempt === maxRetries - 1) {
+                        let errorMessage = "Critical API/Network Failure: Cannot connect to the Vercel function. Ensure your function is deployed and accessible.";
+                        throw new Error(errorMessage);
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // --- UI & Event Handlers ---
+
+        function updateUI(state = 'initial', message = '') {
+            generateButton.disabled = (state === 'loading');
+            copyLinkButton.disabled = (state !== 'success');
+            
+            statusMessage.textContent = message;
+            statusMessage.className = 'mt-6 p-4 rounded-lg text-sm text-center font-medium';
+            statusMessage.classList.add('hidden');
+            
+            if (state !== 'success') {
+                audioOutput.classList.add('hidden');
+                audioPlayer.src = ''; 
+            }
+
+            if (state === 'loading') {
+                statusMessage.classList.remove('hidden');
+                statusMessage.classList.add('bg-blue-100', 'text-blue-800');
+            } else if (state === 'error') {
+                statusMessage.classList.remove('hidden');
+                statusMessage.classList.add('bg-red-100', 'text-red-800');
+            } else if (state === 'success') {
+                statusMessage.classList.remove('hidden');
+                statusMessage.classList.add('bg-green-100', 'text-green-800');
+                audioOutput.classList.remove('hidden');
+            }
+        }
+
+        async function handleGenerate() {
+            const prompt = promptInput.value.trim();
+            
+            if (!prompt) {
+                updateUI('error', 'Please enter a music prompt.');
+                return;
+            }
+
+            updateUI('loading', `Composing music via secure proxy... This may take several seconds.`);
+            
+            try {
+                // Call the new serverless proxy function
+                const result = await callServerlessProxy(prompt);
+
+                if (result && result.url) {
+                    audioPlayer.src = result.url;
+                    audioSourceText.textContent = `Generated track successfully! Format: ${result.type}.`;
+                    updateUI('success', 'Music composition generated successfully! Play the track below.');
+                } else {
+                    throw new Error("Proxy call completed, but no usable audio URL was returned.");
+                }
+
+            } catch (error) {
+                console.error("Generation Error:", error);
+                updateUI('error', `Generation failed: ${error.message}.`);
+            }
+        }
+
+        function handleCopyLink() {
+            const currentPrompt = promptInput.value.trim();
+            // NOTE: You would replace [Your App Link] with your actual hosted Farcaster Frame URL
+            const castText = `🎶 Just composed a track: "${currentPrompt}"! Try the Farcaster Music Studio mini-app to create your own! [Your App Link]`;
+            
+            const textarea = document.createElement('textarea');
+            textarea.value = castText;
+            document.body.appendChild(textarea);
+            textarea.select();
+            
+            try {
+                document.execCommand('copy');
+                updateUI('success', 'Farcaster cast text copied to clipboard! (Don\'t forget to use your real app link!)');
+            } catch (err) {
+                console.error('Failed to copy text: ', err);
+                updateUI('error', 'Failed to copy cast text.');
+            } finally {
+                document.body.removeChild(textarea);
+            }
+        }
+
+
+        function initApp() {
+            generateButton.addEventListener('click', handleGenerate);
+            copyLinkButton.addEventListener('click', handleCopyLink);
+            // The API key input is removed in the production model (just removing the placeholder container is enough)
+            updateUI('initial', 'Ready for secure music composition.');
+        }
+
+        window.onload = initApp;
+
+    </script>
+</body>
+</html>
