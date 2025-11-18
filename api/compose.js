@@ -6,7 +6,7 @@
  */
 
 // Define the ElevenLabs Music Generation API Endpoint
-const ELEVENLABS_URL = 'https://api.elevenlabs.io/v1/music-generation';
+const ELEVENLABS_URL = 'https://api.elevenlabs.io/v1/music/compose';
 
 export default async function handler(request, response) {
     // 1. **Security Check: API Key**
